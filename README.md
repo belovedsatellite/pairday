@@ -26,18 +26,6 @@
 - **저장**: 1920×1080 기준 0.5× ~ 2× (최대 3840×2160) PNG
 - **기타**: 되돌리기/다시 실행, 브라우저 자동 저장, 프로젝트 백업 파일(.json) 저장·불러오기, 파일 끌어다 놓기·붙여넣기
 
-## GitHub Pages로 배포하기
-
-1. GitHub에서 새 저장소를 만듭니다 (예: `pair-day-maker`). Public으로 만들어야 무료 Pages를 쓸 수 있어요.
-2. 이 폴더의 파일을 **폴더 구조 그대로** 저장소 최상단에 올립니다.
-   - 웹에서: 저장소 → **Add file → Upload files** → 압축을 푼 폴더 안의 내용물(`index.html`, `css`, `js`, `vendor`, `README.md`)을 끌어다 놓고 Commit
-3. 저장소 → **Settings → Pages**
-   - Source: **Deploy from a branch**
-   - Branch: `main` / `/(root)` 선택 후 Save
-4. 1~2분 뒤 `https://<아이디>.github.io/<저장소이름>/` 주소로 접속할 수 있어요.
-
-> 로컬에서 확인하려면 `index.html`을 더블클릭해서 열어도 동작합니다. (폰트는 인터넷 연결이 필요해요)
-
 ## 파일 구조
 
 ```
@@ -73,8 +61,7 @@ vendor/pretendard/  Pretendard 가변 폰트 (SIL OFL 1.1, 사이트에 포함)
 - 백업 파일(.json)을 불러올 때 모든 값을 검사하고, 이미지는 `data:image` 형식만 받아요. 외부 주소·스크립트가 섞인 파일은 해당 항목을 버리고 불러와요.
 - Google Fonts 응답은 `@font-face` 규칙과 `fonts.gstatic.com` 주소만 허용해요. 폰트 이름은 영문·숫자·공백·하이픈만 받아요.
 - `github.io` 주소에서는 같은 계정의 다른 Pages 사이트와 브라우저 저장소 영역을 공유해요. 이 사이트는 전용 이름(`pair-day-maker`)의 저장소만 써서 서로 겹치지 않아요.
-- 개발용 디버그 기능은 주소 끝에 `?debug`를 붙였을 때만 켜져요.
-
+  
 ## 참고
 
 - 이미지는 업로드 파일만 지원해요. 외부 URL 이미지는 브라우저 보안 정책 때문에 PNG 저장이 막힙니다.
