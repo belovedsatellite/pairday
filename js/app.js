@@ -10,16 +10,16 @@
   const clamp = (v, a, b) => Math.min(b, Math.max(a, v));
   const rnd = (v, d = 1) => { const k = Math.pow(10, d); return Math.round(v * k) / k; };
 
-  const TEXT_KEYS = ['pair', 'name1', 'sep', 'name2', 'dday', 'days', 'since', 'label', 'catch', 'quote1', 'quote2'];
+  const TEXT_KEYS = ['pair', 'name1', 'sep', 'name2', 'dday', 'days', 'since', 'label', 'catch', 'quote1', 'quote2', 'credit'];
   const TEXT_LABEL = {
     pair: '페어명', name1: '캐릭터 A 이름', sep: '이름 사이 기호', name2: '캐릭터 B 이름',
     dday: '디데이 (D+N)', days: '일수 (N일째)', since: '시작일', label: '라벨',
-    catch: '캐치프레이즈', quote1: '캐릭터 A 대사', quote2: '캐릭터 B 대사'
+    catch: '캐치프레이즈', quote1: '캐릭터 A 대사', quote2: '캐릭터 B 대사', credit: '이미지 출처'
   };
   const DEFAULT_CONTENT = {
     pair: '페어명', name1: '캐릭터 A', name2: '캐릭터 B', sep: '&',
     dday: 'D+{days}', days: '{days}일째', since: 'SINCE {date}', label: 'OUR ANNIVERSARY',
-    catch: '두 사람의 이야기를 한 줄로 적어주세요', quote1: '“캐릭터 A의 대사”', quote2: '“캐릭터 B의 대사”'
+    catch: '두 사람의 이야기를 한 줄로 적어주세요', quote1: '“캐릭터 A의 대사”', quote2: '“캐릭터 B의 대사”', credit: 'illust. @아이디'
   };
   const MULTI = new Set(['catch', 'quote1', 'quote2']);
   const SLOT_DEFS = {
@@ -37,7 +37,8 @@
   let sel = null; // {kind:'text',key} | {kind:'slot',id} | {kind:'sticker',id}
   let history = [], future = [], lastSnap = null, commitTimer = null, saveTimer = null;
   const assets = new Map(); // id → {src, img, w, h}
-  let stage, layer, uiLayer, tr, guideV, guideH, hl;
+  let stage, layer, uiLayer, tr, guides, hl;
+  let snapTargets = null;
   let nodes = { texts: {}, slots: {}, stickers: {} };
   let dragging = false, transforming = false, pendingRender = false, renderQueued = false;
   let storageOk = true;
@@ -57,7 +58,81 @@
     };
   }
 
+  /* ── 외부 데이터 검증 (백업 파일·브라우저 저장소) ── */
+  const BAD_KEYS = new Set(['__proto__', 'constructor', 'prototype']);
+  function safeParse(text) { return JSON.parse(text, (k, v) => (BAD_KEYS.has(k) ? undefined : v)); }
+  const isObj = v => v !== null && typeof v === 'object' && !Array.isArray(v);
+  const num = (v, d, min, max) => { const n = Number(v); return Number.isFinite(n) ? clamp(n, min, max) : d; };
+  const str = (v, max) => (typeof v === 'string' ? v.slice(0, max || 2000) : null);
+  const oneOf = (v, list, d) => (list.includes(v) ? v : d);
+  const FONT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 \-]{0,59}$/;
+  const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+  const IMG_DATA_RE = /^data:image\/(png|jpeg|webp|gif|avif|bmp);base64,[A-Za-z0-9+/=]+$/;
+  const isImageData = src => typeof src === 'string' && src.length < 60e6 && IMG_DATA_RE.test(src);
+
+  function cleanStyle(st) {
+    if (!isObj(st)) return {};
+    const o = {};
+    ['family', 'color', 'strokeColor', 'talign'].forEach(k => { if (typeof st[k] === 'string') o[k] = st[k].slice(0, 80); });
+    if (o.family && o.family !== PRET && !FONT_NAME_RE.test(o.family)) delete o.family;
+    ['size', 'weight', 'ls', 'lh', 'width', 'strokeWidth', 'opacity'].forEach(k => { if (st[k] != null && Number.isFinite(Number(st[k]))) o[k] = Number(st[k]); });
+    if (typeof st.italic === 'boolean') o.italic = st.italic;
+    if (BOX_TYPES.includes(st.box)) o.box = st.box;
+    if (TAILS.includes(st.tail)) o.tail = st.tail;
+    ['boxFill', 'boxStroke'].forEach(k => { if (typeof st[k] === 'string') o[k] = st[k].slice(0, 80); });
+    ['boxStrokeWidth', 'boxPad', 'boxOpacity'].forEach(k => { if (st[k] != null && Number.isFinite(Number(st[k]))) o[k] = Number(st[k]); });
+    if (typeof st.boxShadow === 'boolean') o.boxShadow = st.boxShadow;
+    if (st.shadow === null) o.shadow = null;
+    else if (isObj(st.shadow)) o.shadow = { color: str(st.shadow.color, 80) || '#000000', blur: num(st.shadow.blur, 12, 0, 200), opacity: num(st.shadow.opacity, 0.5, 0, 1), x: num(st.shadow.x, 0, -200, 200), y: num(st.shadow.y, 0, -200, 200) };
+    return o;
+  }
+  function cleanPos(p) { return isObj(p) ? { x: num(p.x, W / 2, -W, W * 2), y: num(p.y, H / 2, -H, H * 2), rotation: num(p.rotation, 0, -360, 360) } : null; }
+  function cleanOver(over) {
+    const out = {};
+    if (!isObj(over)) return out;
+    Object.keys(over).forEach(k => {
+      if (!/^[ABC]:[a-z]+$/.test(k) || !isObj(over[k])) return;
+      const src = over[k], o = { texts: {}, frame: {} };
+      if (isObj(src.texts)) Object.keys(src.texts).forEach(tk => {
+        if (!TEXT_KEYS.includes(tk) || !isObj(src.texts[tk])) return;
+        const t = {};
+        if (src.texts[tk].style) t.style = cleanStyle(src.texts[tk].style);
+        const p = cleanPos(src.texts[tk].pos); if (p) t.pos = p;
+        o.texts[tk] = t;
+      });
+      if (isObj(src.frame)) {
+        const f = src.frame;
+        if (f.shape != null) o.frame.shape = oneOf(f.shape, Object.keys(SHAPE_LABEL), null);
+        ['radius', 'bw', 'gap'].forEach(x => { if (f[x] != null) o.frame[x] = num(f[x], 0, 0, 500); });
+        if (typeof f.bc === 'string') o.frame.bc = f.bc.slice(0, 80);
+        ['polaroid', 'shadow'].forEach(x => { if (typeof f[x] === 'boolean') o.frame[x] = f[x]; });
+      }
+      out[k] = o;
+    });
+    return out;
+  }
+  function cleanSlots(slots) {
+    const out = {};
+    if (!isObj(slots)) return out;
+    Object.keys(slots).forEach(k => {
+      const v = slots[k];
+      if (!/^[ABC]:(main|c1|c2)$/.test(k) || !isObj(v) || typeof v.asset !== 'string') return;
+      out[k] = { asset: v.asset.slice(0, 40), zoom: num(v.zoom, 1, 0.05, 20), dx: num(v.dx, 0, -5, 5), dy: num(v.dy, 0, -5, 5), rot: num(v.rot, 0, -360, 360), flip: !!v.flip };
+    });
+    return out;
+  }
+  function cleanStickers(list) {
+    if (!Array.isArray(list)) return [];
+    return list.slice(0, 200).filter(isObj).map(sk => {
+      const o = { id: (str(sk.id, 40) || uid()), kind: sk.kind === 'image' ? 'image' : 'text', x: num(sk.x, W / 2, -W, W * 2), y: num(sk.y, H / 2, -H, H * 2), scale: num(sk.scale, 1, 0.01, 50), rot: num(sk.rot, 0, -360, 360), flip: !!sk.flip, opacity: num(sk.opacity, 1, 0, 1) };
+      if (o.kind === 'image') { o.asset = str(sk.asset, 40); o.w = num(sk.w, 400, 1, 8000); }
+      else { o.text = str(sk.text, 500) || ''; o.style = cleanStyle(sk.style); }
+      return o;
+    });
+  }
+
   function migrate(s) {
+    if (!isObj(s)) return defaultState();
     const d = defaultState();
     const out = Object.assign({}, d, s);
     out.dday = Object.assign({}, d.dday, s.dday);
@@ -69,7 +144,35 @@
     TEXT_KEYS.forEach(k => { out.texts[k] = Object.assign({}, d.texts[k], (s.texts || {})[k]); });
     if (!THEMES.find(t => t.id === out.theme)) out.theme = THEMES[0].id;
     if (!['A', 'B', 'C'].includes(out.type)) out.type = 'A';
-    out.customFonts = Array.isArray(s.customFonts) ? s.customFonts : [];
+    // 값 검증
+    out.type = oneOf(out.type, ['A', 'B', 'C'], 'A');
+    out.decor = out.decor !== false;
+    out.globalFont = (typeof s.globalFont === 'string' && (s.globalFont === PRET || FONT_NAME_RE.test(s.globalFont))) ? s.globalFont : null;
+    out.customFonts = Array.isArray(s.customFonts) ? s.customFonts.filter(f => typeof f === 'string' && FONT_NAME_RE.test(f)).slice(0, 50) : [];
+    const acc = {};
+    Object.keys(out.accent).forEach(k => { if (THEMES.some(t => t.id === k) && typeof out.accent[k] === 'string') acc[k] = out.accent[k].slice(0, 80); });
+    out.accent = acc;
+    out.dday = {
+      mode: oneOf(out.dday.mode, ['auto', 'manual'], 'auto'),
+      start: DATE_RE.test(out.dday.start) ? out.dday.start : d.dday.start,
+      base: DATE_RE.test(out.dday.base) ? out.dday.base : '',
+      manual: num(out.dday.manual, 100, -999999, 999999),
+      fmt: oneOf(out.dday.fmt, ['dot', 'dash', 'short', 'kor', 'us'], 'dot')
+    };
+    TEXT_KEYS.forEach(k => { const t = out.texts[k]; out.texts[k] = { visible: t.visible !== false && t.visible !== 0, content: str(t.content, 2000) }; });
+    out.over = cleanOver(s.over);
+    out.slots = cleanSlots(s.slots);
+    ['A', 'B', 'C'].forEach(t => { out.stickers[t] = cleanStickers((s.stickers || {})[t]); });
+    Object.keys(out.stickers).forEach(t => { if (!['A', 'B', 'C'].includes(t)) delete out.stickers[t]; });
+    const b = out.bg;
+    out.bg = {
+      mode: oneOf(b.mode, ['theme', 'solid', 'gradient', 'image'], 'theme'),
+      color: str(b.color, 80) || d.bg.color, g1: str(b.g1, 80) || d.bg.g1, g2: str(b.g2, 80) || d.bg.g2,
+      gtype: oneOf(b.gtype, ['linear', 'radial'], 'linear'), angle: num(b.angle, 135, 0, 360),
+      asset: str(b.asset, 40), zoom: num(b.zoom, 1, 1, 10), dx: num(b.dx, 0, -1, 1), dy: num(b.dy, 0, -1, 1),
+      blur: num(b.blur, 0, 0, 60), dim: num(b.dim, 0, 0, 1), dimColor: str(b.dimColor, 80) || '#000000'
+    };
+    out.exp = { scale: oneOf(Number(out.exp.scale), [0.5, 1, 1.5, 2], 1), name: str(out.exp.name, 120) || d.exp.name };
     return out;
   }
 
@@ -435,10 +538,112 @@
     });
     TEXT_KEYS.forEach(k => {
       if (!made[k]) return;
-      lyr.add(made[k].n);
+      const box = addWithBox(lyr, made[k].n, made[k].sp, theme, st);
       out.texts[k] = made[k].n;
-      if (opts.editing && opts.bind) opts.bind.text(made[k].n, k);
+      if (opts.editing && opts.bind) opts.bind.text(made[k].n, k, box);
     });
+  }
+
+  /* ── 말풍선 · 인용구 박스 ── */
+  const BOX_TYPES = ['bubble', 'square', 'thought', 'quote', 'tag'];
+  const TAILS = ['bl', 'bc', 'br', 'tl', 'tc', 'tr', 'none'];
+  function textBounds(n) {
+    // 실제 글자가 차지하는 가로 범위 (고정 너비 상자 안에서 정렬된 줄 기준)
+    const w = n.width(), al = n.align(), lines = n.textArr || [];
+    let x0 = Infinity, x1 = -Infinity;
+    lines.forEach(l => {
+      const lw = l.width || 0;
+      const off = al === 'center' ? (w - lw) / 2 : al === 'right' ? w - lw : 0;
+      x0 = Math.min(x0, off); x1 = Math.max(x1, off + lw);
+    });
+    if (!isFinite(x0)) { x0 = 0; x1 = w; }
+    return { x: x0, y: 0, w: Math.max(1, x1 - x0), h: n.height() };
+  }
+  function bubblePath(c, R, r, tail, t, sharp) {
+    const { x, y, w, h } = R;
+    r = Math.max(0, Math.min(r, w / 2, h / 2));
+    let ax = null, dir = 0, top = false;
+    if (tail && tail !== 'none' && t > 0) {
+      top = tail[0] === 't';
+      const pos = tail[1] === 'l' ? 0.22 : tail[1] === 'r' ? 0.78 : 0.5;
+      dir = tail[1] === 'l' ? -1 : tail[1] === 'r' ? 1 : 0;
+      const half = t * 0.45, lo = x + r + half, hi = x + w - r - half;
+      if (hi > lo) ax = clamp(x + w * pos, lo, hi);
+    }
+    const tipOff = sharp ? 0.9 : 0.5, half = t * 0.45;
+    c.moveTo(x + r, y);
+    if (ax !== null && top) { c.lineTo(ax - half, y); c.lineTo(ax + dir * t * tipOff, y - t); c.lineTo(ax + half, y); }
+    c.lineTo(x + w - r, y); c.arcTo(x + w, y, x + w, y + r, r);
+    c.lineTo(x + w, y + h - r); c.arcTo(x + w, y + h, x + w - r, y + h, r);
+    if (ax !== null && !top) { c.lineTo(ax + half, y + h); c.lineTo(ax + dir * t * tipOff, y + h + t); c.lineTo(ax - half, y + h); }
+    c.lineTo(x + r, y + h); c.arcTo(x, y + h, x, y + h - r, r);
+    c.lineTo(x, y + r); c.arcTo(x, y, x + r, y, r);
+    c.closePath();
+    return { ax, dir, top };
+  }
+  function makeBox(n, sp, theme, st) {
+    const type = sp.box;
+    const fill = col(sp.boxFill || '#FFFFFF', theme, st);
+    const stroke = col(sp.boxStroke || 'ink', theme, st);
+    const sw = sp.boxStrokeWidth == null ? 0 : sp.boxStrokeWidth;
+    const pad = sp.boxPad == null ? Math.round(sp.size * 0.7) : sp.boxPad;
+    const fillAlpha = sp.boxOpacity == null ? 1 : sp.boxOpacity;
+    const shape = new Konva.Shape({
+      listening: true,
+      sceneFunc: (c, s) => {
+        const b = textBounds(n), padY = pad * 0.72;
+        const R = { x: b.x - pad, y: -padY, w: b.w + pad * 2, h: b.h + padY * 2 };
+        const t = clamp(Math.min(R.w, R.h) * 0.42, 12, 46);
+        const ctx = c._context;
+        const doFill = () => { if (fillAlpha > 0) { ctx.globalAlpha = s.getAbsoluteOpacity() * fillAlpha; ctx.fillStyle = fill; ctx.fill(); ctx.globalAlpha = s.getAbsoluteOpacity(); } };
+        const doStroke = () => { if (sw > 0) { ctx.shadowColor = 'transparent'; ctx.lineWidth = sw; ctx.strokeStyle = stroke; ctx.lineJoin = 'round'; ctx.stroke(); } };
+        if (sp.boxShadow) { ctx.shadowColor = 'rgba(0,0,0,0.2)'; ctx.shadowBlur = 26; ctx.shadowOffsetY = 8; }
+        ctx.beginPath();
+        if (type === 'quote') {
+          if (fillAlpha > 0) { ctx.rect(R.x, R.y, R.w, R.h); doFill(); }
+          ctx.shadowColor = 'transparent';
+          const bw = Math.max(2, sw || 4);
+          ctx.fillStyle = stroke;
+          ctx.fillRect(R.x, R.y, bw, R.h);
+          const gs = Math.max(40, sp.size * 2.4);
+          ctx.font = `700 ${gs}px Georgia, "Times New Roman", serif`;
+          ctx.textBaseline = 'alphabetic';
+          ctx.fillText('\u201C', R.x - gs * 0.5, R.y + gs * 0.62);
+          return;
+        }
+        if (type === 'tag') { bubblePath(ctx, R, R.h / 2, 'none', 0, false); doFill(); doStroke(); return; }
+        if (type === 'thought') {
+          const info = bubblePath(ctx, R, R.h / 2, 'none', 0, false);
+          const pos = (sp.tail || 'bl')[1], top = (sp.tail || 'bl')[0] === 't';
+          if ((sp.tail || 'bl') !== 'none') {
+            const dir = pos === 'l' ? -1 : pos === 'r' ? 1 : 0;
+            const ax = R.x + R.w * (pos === 'l' ? 0.22 : pos === 'r' ? 0.78 : 0.5);
+            const ey = top ? R.y : R.y + R.h, sg = top ? -1 : 1;
+            [[0.35, 0.6, 0.3], [0.8, 1.2, 0.17]].forEach(([dx, dy, rr]) => {
+              const cx = ax + dir * t * dx, cy = ey + sg * t * dy;
+              ctx.moveTo(cx + t * rr, cy); ctx.arc(cx, cy, t * rr, 0, Math.PI * 2);
+            });
+          }
+          doFill(); doStroke(); return info;
+        }
+        bubblePath(ctx, R, type === 'square' ? 4 : Math.min(R.h / 2, 34), sp.tail || 'bl', t, type === 'square');
+        doFill(); doStroke();
+      },
+      hitFunc: (c, s) => {
+        const b = textBounds(n), padY = pad * 0.72;
+        c.beginPath(); c.rect(b.x - pad, -padY, b.w + pad * 2, b.h + padY * 2); c.closePath(); c.fillShape(s);
+      }
+    });
+    const sync = () => shape.setAttrs({ x: n.x(), y: n.y(), offsetX: n.offsetX(), offsetY: n.offsetY(), rotation: n.rotation(), scaleX: n.scaleX(), scaleY: n.scaleY(), opacity: n.opacity() });
+    sync();
+    n.on('xChange.box yChange.box rotationChange.box scaleXChange.box scaleYChange.box', sync);
+    return shape;
+  }
+  function addWithBox(lyr, n, sp, theme, st) {
+    let box = null;
+    if (sp.box && BOX_TYPES.includes(sp.box)) { box = makeBox(n, sp, theme, st); lyr.add(box); }
+    lyr.add(n);
+    return box;
   }
 
   function stickerSpec(sk) { return Object.assign({}, STICKER_TEXT_DEFAULT, sk.style || {}); }
@@ -474,8 +679,9 @@
     buildTexts(lyr, st, theme, L, opts, out);
     (st.stickers[st.type] || []).forEach(sk => {
       const n = makeSticker(sk, st, theme); if (!n) return;
-      lyr.add(n); out.stickers[sk.id] = n;
-      if (opts.editing && opts.bind) opts.bind.sticker(n, sk);
+      const box = sk.kind === 'text' ? addWithBox(lyr, n, stickerSpec(sk), theme, st) : (lyr.add(n), null);
+      out.stickers[sk.id] = n;
+      if (opts.editing && opts.bind) opts.bind.sticker(n, sk, box);
     });
     return out;
   }
@@ -522,11 +728,12 @@
   /* ═════════════ 렌더 ═════════════ */
   const bindings = {
     bg(rect) { rect.on('mousedown touchstart', () => select(null)); },
-    text(n, key) {
+    text(n, key, box) {
+      if (box) box.on('mousedown touchstart', () => { select({ kind: 'text', key }); n.startDrag(); });
       n.draggable(true);
       n.on('mouseenter', () => cursor('move')); n.on('mouseleave', () => cursor(''));
       n.on('mousedown touchstart', () => select({ kind: 'text', key }));
-      n.on('dragstart', () => { dragging = true; });
+      n.on('dragstart', () => { dragging = true; snapTargets = collectSnapTargets(n); });
       n.on('dragmove', e => snap(n, e));
       n.on('dragend', () => {
         dragging = false; hideGuides();
@@ -564,11 +771,12 @@
         });
       }
     },
-    sticker(n, sk) {
+    sticker(n, sk, box) {
+      if (box) box.on('mousedown touchstart', () => { select({ kind: 'sticker', id: sk.id }); n.startDrag(); });
       n.draggable(true);
       n.on('mouseenter', () => cursor('move')); n.on('mouseleave', () => cursor(''));
       n.on('mousedown touchstart', () => select({ kind: 'sticker', id: sk.id }));
-      n.on('dragstart', () => { dragging = true; });
+      n.on('dragstart', () => { dragging = true; snapTargets = collectSnapTargets(n); });
       n.on('dragmove', e => snap(n, e));
       n.on('dragend', () => { dragging = false; hideGuides(); sk.x = rnd(n.x()); sk.y = rnd(n.y()); afterCanvasEdit(); });
       n.on('transformstart', () => { transforming = true; });
@@ -592,10 +800,10 @@
     if (!layer) return;
     if (dragging || transforming) { pendingRender = true; return; }
     if (tr) tr.nodes([]);
-    [hl, guideV, guideH, tr].forEach(n => n && n.remove());
+    [hl, guides, tr].forEach(n => n && n.remove());
     layer.destroyChildren();
     nodes = buildScene(layer, state, { editing: true, bind: bindings });
-    layer.add(hl, guideV, guideH, tr);
+    layer.add(hl, guides, tr);
     layer.batchDraw();
     attachTransformer();
     checkFonts(state);
@@ -610,16 +818,43 @@
 
   function cursor(c) { if (stage) stage.container().style.cursor = c; }
 
-  function snap(n, e) {
-    if (e && e.evt && e.evt.altKey) { hideGuides(); return; }
-    const T = 12;
-    let { x, y } = n.position(), sv = false, sh = false;
-    if (Math.abs(x - W / 2) < T) { x = W / 2; sv = true; }
-    if (Math.abs(y - H / 2) < T) { y = H / 2; sh = true; }
-    n.position({ x, y });
-    guideV.visible(sv); guideH.visible(sh); uiLayer.batchDraw();
+  /* 맞춤 가이드: 캔버스 가장자리·중앙 + 다른 요소의 가장자리·중심 */
+  function rectOf(n) { return n.getClientRect({ relativeTo: layer, skipShadow: true }); }
+  function collectSnapTargets(except) {
+    const v = [{ p: 0, c: true }, { p: W / 2, c: true }, { p: W, c: true }];
+    const hz = [{ p: 0, c: true }, { p: H / 2, c: true }, { p: H, c: true }];
+    const addRect = r => {
+      v.push({ p: r.x }, { p: r.x + r.width / 2 }, { p: r.x + r.width });
+      hz.push({ p: r.y }, { p: r.y + r.height / 2 }, { p: r.y + r.height });
+    };
+    Object.values(nodes.texts).forEach(n => { if (n !== except) addRect(rectOf(n)); });
+    Object.values(nodes.stickers).forEach(n => { if (n !== except) addRect(rectOf(n)); });
+    Object.values(nodes.slots).forEach(sr => addRect({ x: sr.sd.x, y: sr.sd.y, width: sr.sd.w, height: sr.sd.h }));
+    return { v, h: hz };
   }
-  function hideGuides() { guideV.visible(false); guideH.visible(false); uiLayer.batchDraw(); }
+  function bestSnap(points, targets, T) {
+    let best = null;
+    points.forEach(pt => targets.forEach(t => {
+      const d = t.p - pt;
+      if (Math.abs(d) <= T && (!best || Math.abs(d) < Math.abs(best.d) - 0.01)) best = { d, t };
+    }));
+    return best;
+  }
+  function snap(n, e) {
+    guides.destroyChildren();
+    if ((e && e.evt && e.evt.altKey) || !snapTargets) { layer.batchDraw(); return; }
+    const T = 7 / stage.scaleX();
+    let r = rectOf(n);
+    const bx = bestSnap([r.x, r.x + r.width / 2, r.x + r.width], snapTargets.v, T);
+    const by = bestSnap([r.y, r.y + r.height / 2, r.y + r.height], snapTargets.h, T);
+    if (bx) n.x(n.x() + bx.d);
+    if (by) n.y(n.y() + by.d);
+    const line = (pts, c) => guides.add(new Konva.Line({ points: pts, stroke: c ? '#FF4D8D' : '#3D7BFF', strokeWidth: 1, strokeScaleEnabled: false, dash: [6, 4], listening: false }));
+    if (bx) line([bx.t.p, 0, bx.t.p, H], bx.t.c);
+    if (by) line([0, by.t.p, W, by.t.p], by.t.c);
+    layer.batchDraw();
+  }
+  function hideGuides() { snapTargets = null; if (guides) guides.destroyChildren(); layer.batchDraw(); }
 
   /* ═════════════ 선택 ═════════════ */
   function sameSel(a, b) { return JSON.stringify(a) === JSON.stringify(b); }
@@ -670,7 +905,7 @@
     else commitNow();
   }
   function restore(snap) {
-    state = migrate(JSON.parse(snap));
+    state = migrate(safeParse(snap));
     validateSel();
     fullRefresh();
     scheduleSave();
@@ -693,23 +928,32 @@
   const readFile = f => new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(f); });
   async function downscale(src, max = 4096) {
     const img = await loadImage(src);
-    const m = Math.max(img.naturalWidth, img.naturalHeight);
-    if (m <= max) return src;
-    const k = max / m, c = document.createElement('canvas');
-    c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
+    const m = Math.max(img.naturalWidth, img.naturalHeight) || 1;
+    if (m <= max && isImageData(src)) return src;
+    const k = Math.min(1, max / m), c = document.createElement('canvas');
+    c.width = Math.max(1, Math.round((img.naturalWidth || 1024) * k)); c.height = Math.max(1, Math.round((img.naturalHeight || 1024) * k));
     c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
     return c.toDataURL('image/png');
   }
   async function registerAsset(id, src) {
+    if (!isImageData(src)) throw new Error('지원하지 않는 이미지 데이터');
     const img = await loadImage(src);
     assets.set(id, { src, img, w: img.naturalWidth, h: img.naturalHeight });
   }
   async function addAssetFromFile(file) {
+    if (!file || !/^image\//.test(file.type)) throw new Error('이미지 파일이 아님');
+    if (file.size > 40 * 1024 * 1024) { toast('40MB보다 큰 이미지는 넣을 수 없어요.'); throw new Error('too large'); }
     const src = await downscale(await readFile(file));
     const id = uid();
     await registerAsset(id, src);
     if (storageOk) Store.set('asset:' + id, src).catch(() => {});
     return id;
+  }
+  // 불러오지 못한 이미지를 가리키는 참조 정리
+  function dropOrphans() {
+    Object.keys(state.slots).forEach(k => { const v = state.slots[k]; if (!v || !assets.get(v.asset)) delete state.slots[k]; });
+    if (state.bg.asset && !assets.get(state.bg.asset)) state.bg.asset = null;
+    Object.keys(state.stickers).forEach(t => { state.stickers[t] = (state.stickers[t] || []).filter(sk => sk.kind !== 'image' || assets.get(sk.asset)); });
   }
   function referencedAssets(st) {
     const ids = new Set();
@@ -844,14 +1088,16 @@
   }
   async function loadProject(file) {
     try {
-      const data = JSON.parse(await file.text());
-      if (!data || !data.state) throw new Error('형식 오류');
-      for (const [id, src] of Object.entries(data.assets || {})) {
+      if (file.size > 300 * 1024 * 1024) throw new Error('파일이 너무 큼');
+      const data = safeParse(await file.text());
+      if (!isObj(data) || !isObj(data.state)) throw new Error('형식 오류');
+      for (const [id, src] of Object.entries(isObj(data.assets) ? data.assets : {})) {
+        if (!/^[a-z0-9]{1,40}$/i.test(id) || !isImageData(src)) continue;
         await registerAsset(id, src);
         if (storageOk) Store.set('asset:' + id, src).catch(() => {});
       }
       commitNow();
-      state = migrate(data.state); sel = null;
+      state = migrate(data.state); sel = null; dropOrphans();
       fullRefresh(); commitNow();
       toast('백업을 불러왔어요');
     } catch (e) { toast('백업 파일을 읽지 못했어요.'); }
@@ -953,10 +1199,15 @@
   function updateDdayInfo() {
     const days = calcDays(state);
     const box = $('#ddayResult');
-    if (state.dday.mode === 'manual') { box.innerHTML = `직접 입력 · <b>${days}일째</b> · D+${days}`; return; }
-    if (!parseYmd(state.dday.start)) { box.innerHTML = '<span class="warn">시작일을 입력해 주세요.</span>'; return; }
-    const base = parseYmd(state.dday.base) ? state.dday.base.replace(/-/g, '.') : '오늘';
-    box.innerHTML = `${base} 기준 <b>${days}일째</b> · D+${days}` + (days < 1 ? '<br><span class="warn">시작일이 기준일보다 늦어요.</span>' : '');
+    const parts = [];
+    if (state.dday.mode === 'manual') parts.push('직접 입력 · ', h('b', null, days + '일째'), ' · D+' + days);
+    else if (!parseYmd(state.dday.start)) parts.push(h('span', { class: 'warn' }, '시작일을 입력해 주세요.'));
+    else {
+      const base = parseYmd(state.dday.base) ? state.dday.base.replace(/-/g, '.') : '오늘';
+      parts.push(base + ' 기준 ', h('b', null, days + '일째'), ' · D+' + days);
+      if (days < 1) parts.push(h('br'), h('span', { class: 'warn' }, '시작일이 기준일보다 늦어요.'));
+    }
+    box.replaceChildren(...parts);
   }
   const hexCtx = document.createElement('canvas').getContext('2d');
   function toHex(c) {
@@ -1128,6 +1379,7 @@
     const go = async () => {
       const name = inp.value.trim().replace(/\s+/g, ' ');
       if (!name) return;
+      if (!FONT_NAME_RE.test(name)) { toast('폰트 이름은 영문·숫자·공백·하이픈만 쓸 수 있어요. (예: Noto Sans KR)'); return; }
       btn.disabled = true; btn.textContent = '확인 중…';
       const ok = await Fonts.addCustom(name);
       btn.disabled = false; btn.textContent = '불러오기';
@@ -1164,6 +1416,7 @@
     wrap.append(toggleC('기울임 (이탤릭)', sp.italic, v => hard('italic', v)));
     wrap.append(fieldC('줄바꿈 너비 (0 = 자동)', rangeC(sp.width || 0, 0, 1800, 10, v => live('width', v || 0))));
 
+    if (opt.box) wrap.append(boxControls(sp, setS, live, opt));
     const g1 = h('div', { class: 'insp-group' }, h('div', { class: 'gtitle' }, '외곽선'),
       h('div', { class: 'grid2' },
         fieldC('두께', rangeC(sp.strokeWidth || 0, 0, 24, 0.5, v => live('strokeWidth', v))),
@@ -1185,6 +1438,44 @@
     wrap.append(g2);
     wrap.append(h('div', { class: 'insp-group' }, fieldC('투명도', rangeC(sp.opacity == null ? 1 : sp.opacity, 0.05, 1, 0.01, v => live('opacity', v), n => Math.round(n * 100) + '%'))));
     return wrap;
+  }
+
+  const BOX_PRESETS = [
+    ['none', '기본', {}],
+    ['bubble', '말풍선', { box: 'bubble', boxFill: '#FFFFFF', boxStroke: '#1C1C1E', boxStrokeWidth: 0, boxOpacity: 0.96, boxShadow: true, color: '#2B2B2B', shadow: null }],
+    ['square', '만화 말풍선', { box: 'square', boxFill: '#FFFFFF', boxStroke: '#1C1C1E', boxStrokeWidth: 3, boxOpacity: 1, boxShadow: false, color: '#1C1C1E', shadow: null }],
+    ['thought', '생각 풍선', { box: 'thought', boxFill: '#FFFFFF', boxStroke: '#1C1C1E', boxStrokeWidth: 0, boxOpacity: 0.94, boxShadow: true, color: '#2B2B2B', shadow: null }],
+    ['quote', '인용구', { box: 'quote', boxFill: '#FFFFFF', boxStroke: 'accent', boxStrokeWidth: 4, boxOpacity: 0, boxShadow: false }],
+    ['tag', '라벨', { box: 'tag', boxFill: 'accent', boxStroke: '#FFFFFF', boxStrokeWidth: 0, boxOpacity: 1, boxShadow: false, color: '#FFFFFF', shadow: null }]
+  ];
+  const BOX_KEYS = ['box', 'boxFill', 'boxStroke', 'boxStrokeWidth', 'boxPad', 'boxOpacity', 'boxShadow', 'tail'];
+  function boxControls(sp, setS, live, opt) {
+    const theme = getTheme(state.theme);
+    const cur = sp.box && BOX_TYPES.includes(sp.box) ? sp.box : 'none';
+    const apply = preset => {
+      BOX_KEYS.forEach(k => setS(k, undefined));
+      if (preset[0] === 'none') { if (!opt.isSticker) { setS('color', undefined); setS('shadow', undefined); } }
+      else { Object.entries(preset[2]).forEach(([k, v]) => setS(k, v)); setS('tail', opt.tail || 'bl'); }
+      render(); commit(); renderInspector();
+    };
+    const grid = h('div', { class: 'preset-grid' }, BOX_PRESETS.map(p =>
+      h('button', { type: 'button', class: 'preset' + (p[0] === cur ? ' active' : ''), onclick: () => apply(p) }, h('span', { class: 'pv pv-' + p[0] }, p[0] === 'quote' ? '“' : ''), p[1])));
+    const g = h('div', { class: 'insp-group' }, h('div', { class: 'gtitle' }, '말풍선 · 인용구'), grid);
+    if (cur === 'none') { g.append(h('p', { class: 'note' }, '스타일을 고르면 글자색도 어울리게 바뀌어요. 이후 자유롭게 조정할 수 있어요.')); return g; }
+    const hard = (k, v) => { setS(k, v); render(); commit(); renderInspector(); };
+    if (['bubble', 'square', 'thought'].includes(cur)) {
+      g.append(fieldC('꼬리 방향', selectC([['bl', '아래 · 왼쪽'], ['bc', '아래 · 가운데'], ['br', '아래 · 오른쪽'], ['tl', '위 · 왼쪽'], ['tc', '위 · 가운데'], ['tr', '위 · 오른쪽'], ['none', '꼬리 없음']], sp.tail || 'bl', v => hard('tail', v))));
+    }
+    g.append(h('div', { class: 'grid2' },
+      fieldC(cur === 'quote' ? '배경색' : '채우기', colorC(col(sp.boxFill || '#FFFFFF', theme, state), v => live('boxFill', v))),
+      fieldC('채우기 진하기', rangeC(sp.boxOpacity == null ? 1 : sp.boxOpacity, 0, 1, 0.01, v => live('boxOpacity', v), n => Math.round(n * 100) + '%'))));
+    g.append(h('div', { class: 'grid2' },
+      fieldC(cur === 'quote' ? '선 · 따옴표 색' : '테두리 색', h('div', { class: 'color-row' }, colorC(col(sp.boxStroke || '#1C1C1E', theme, state), v => live('boxStroke', v)),
+        h('button', { type: 'button', class: 'mini' + (sp.boxStroke === 'accent' ? ' on' : ''), onclick: () => hard('boxStroke', 'accent') }, '포인트'))),
+      fieldC(cur === 'quote' ? '선 두께' : '테두리 두께', rangeC(sp.boxStrokeWidth || 0, 0, 16, 0.5, v => live('boxStrokeWidth', v)))));
+    g.append(fieldC('안쪽 여백', rangeC(sp.boxPad == null ? Math.round(sp.size * 0.7) : sp.boxPad, 0, 120, 1, v => live('boxPad', v))));
+    if (cur !== 'quote') g.append(toggleC('풍선 그림자', !!sp.boxShadow, v => hard('boxShadow', v)));
+    return g;
   }
 
   function inspHead(kind, title) {
@@ -1227,7 +1518,7 @@
     const get = () => resolveTextSpec(state, theme, L, key).sp;
     const setS = (p, v) => {
       const o = textOver(key, true); o.style = o.style || {};
-      if (p === 'family' && !v) delete o.style.family; else o.style[p] = v;
+      if ((p === 'family' && !v) || v === undefined) delete o.style[p]; else o.style[p] = v;
     };
     const ph = theme.defaults && theme.defaults[key] != null ? theme.defaults[key] : DEFAULT_CONTENT[key];
     const content = MULTI.has(key)
@@ -1238,7 +1529,7 @@
     const top = h('div', { class: 'insp-body' }, fieldC('내용', content), vis);
     box.append(inspHead('텍스트', TEXT_LABEL[key]), top);
     bindInputs(top);
-    const sc = styleControls(get, setS, { allowFamilyDefault: true, familyOverridden: !!(o.style && o.style.family) });
+    const sc = styleControls(get, setS, { allowFamilyDefault: true, familyOverridden: !!(o.style && o.style.family), box: ['quote1', 'quote2', 'catch'].includes(key), tail: state.type === 'B' ? 'tc' : (key === 'quote2' ? 'br' : 'bl') });
     box.append(h('div', { class: 'insp-group' }, sc));
     const n = nodes.texts[key];
     const rotCtl = rangeC(o.pos ? (o.pos.rotation || 0) : (n ? rnd(n.rotation()) : 0), -180, 180, 1, v => {
@@ -1291,7 +1582,7 @@
       const ta = h('textarea', { rows: 2, 'data-content': '' }); ta.value = sk.text;
       ta.addEventListener('input', () => { sk.text = ta.value; render(); commit(true); renderStickerList(); });
       body.append(fieldC('내용', ta));
-      body.append(styleControls(() => stickerSpec(sk), (p, v) => { sk.style = sk.style || {}; sk.style[p] = v; }, {}));
+      body.append(styleControls(() => stickerSpec(sk), (p, v) => { sk.style = sk.style || {}; if (v === undefined) delete sk.style[p]; else sk.style[p] = v; }, { box: true, tail: 'bl', isSticker: true }));
     } else {
       const prev = h('div', { class: 'insp-preview' }); prev.style.backgroundImage = `url("${(assets.get(sk.asset) || {}).src}")`;
       body.append(prev, fieldC('투명도', rangeC(sk.opacity == null ? 1 : sk.opacity, 0.05, 1, 0.01, v => { sk.opacity = v; const n = nodes.stickers[sk.id]; if (n) { n.opacity(v); layer.batchDraw(); } commit(true); }, n => Math.round(n * 100) + '%')));
@@ -1430,14 +1721,13 @@
       visible: false, listening: false, stroke: SEL_COLOR, strokeWidth: 2, dash: [8, 6], strokeScaleEnabled: false,
       sceneFunc: (c, s) => { c.beginPath(); shapePath(c, s.getAttr('hshape'), 0, 0, s.getAttr('hw'), s.getAttr('hh'), s.getAttr('hr')); c.closePath(); c.fillStrokeShape(s); }
     });
-    guideV = new Konva.Line({ points: [W / 2, 0, W / 2, H], stroke: '#FF4D8D', strokeWidth: 1, strokeScaleEnabled: false, dash: [6, 4], visible: false, listening: false });
-    guideH = new Konva.Line({ points: [0, H / 2, W, H / 2], stroke: '#FF4D8D', strokeWidth: 1, strokeScaleEnabled: false, dash: [6, 4], visible: false, listening: false });
-    layer.add(hl, guideV, guideH, tr);
+    guides = new Konva.Group({ listening: false });
+    layer.add(hl, guides, tr);
 
     // 저장된 작업 불러오기
     let saved = null;
     try { saved = await Store.get('state'); } catch (e) { storageOk = false; }
-    try { state = saved ? migrate(JSON.parse(saved)) : defaultState(); } catch (e) { state = defaultState(); }
+    try { state = saved ? migrate(safeParse(saved)) : defaultState(); } catch (e) { state = defaultState(); }
     if (storageOk) {
       const ids = referencedAssets(state);
       for (const id of ids) {
@@ -1446,10 +1736,7 @@
       // 쓰지 않는 이미지 정리
       Store.keys().then(keys => keys.forEach(k => { if (String(k).startsWith('asset:') && !ids.has(String(k).slice(6))) Store.del(k).catch(() => {}); })).catch(() => {});
     }
-    // 사라진 이미지 참조 정리
-    Object.keys(state.slots).forEach(k => { const s = state.slots[k]; if (!s || !assets.get(s.asset)) delete state.slots[k]; });
-    if (state.bg.asset && !assets.get(state.bg.asset)) state.bg.asset = null;
-    Object.keys(state.stickers).forEach(t => { state.stickers[t] = (state.stickers[t] || []).filter(sk => sk.kind !== 'image' || assets.get(sk.asset)); });
+    dropOrphans();
 
     buildThemeGrid();
     $('#symbolGrid').append(...SYMBOLS.map(s => h('button', { type: 'button', 'data-act': 'symbol', 'data-sym': s, title: s + ' 추가' }, s)));
@@ -1547,7 +1834,7 @@
     if (!storageOk) toast('이 브라우저에서는 자동 저장이 안 돼요. 백업 파일 저장을 이용해 주세요.');
 
     // 디버그·테스트용
-    window.PairDay = { get state() { return state; }, render, exportBlob, renderExportCanvas, select, addTextSticker, setSlotAssetFromSrc: async (slot, src) => { const id = uid(); await registerAsset(id, src); setSlotAsset(slot, id); return id; }, setBgFromSrc: async src => { const id = uid(); await registerAsset(id, src); state.bg.asset = id; state.bg.mode = 'image'; render(); syncUI(); commit(); } };
+    if (/[?&]debug\b/.test(location.search)) window.PairDay = { get state() { return state; }, render, exportBlob, renderExportCanvas, select, addTextSticker, setSlotAssetFromSrc: async (slot, src) => { const id = uid(); await registerAsset(id, src); setSlotAsset(slot, id); return id; }, setBgFromSrc: async src => { const id = uid(); await registerAsset(id, src); state.bg.asset = id; state.bg.mode = 'image'; render(); syncUI(); commit(); } };
   }
 
   init();

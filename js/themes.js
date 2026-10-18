@@ -393,5 +393,24 @@ window.THEMES = (function () {
     }
   };
 
+  /* 이미지 출처(credit) 위치 — 레이아웃별 */
+  const C_IMG = (x, y, sh, extra) => Object.assign({ x, y, align: 'right', anchorY: 'bottom', family: PRET, size: 14, weight: 500, ls: 1, color: '#FFFFFF', shadow: sh }, extra || {});
+  const C_BG = (x, y, extra) => Object.assign({ x, y, align: 'right', anchorY: 'bottom', family: PRET, size: 13, weight: 500, ls: 1, color: 'sub' }, extra || {});
+  minimal.layouts.A.texts.credit = C_IMG(1824, 1032, SH_DARK);
+  minimal.layouts.B.texts.credit = C_BG(960, 1030, { align: 'center' });
+  minimal.layouts.C.texts.credit = C_BG(1710, 1030);
+  cinema.layouts.A.texts.credit = C_IMG(1840, 946, SH_DARK);
+  cinema.layouts.B.texts.credit = C_BG(1840, 1030, { anchorY: 'middle' });
+  cinema.layouts.C.texts.credit = C_BG(1840, 1030, { anchorY: 'middle' });
+  letter.layouts.A.texts.credit = C_BG(1800, 1032);
+  letter.layouts.B.texts.credit = C_BG(1840, 1040);
+  letter.layouts.C.texts.credit = C_BG(1710, 106, { size: 14 });
+  editorial.layouts.A.texts.credit = C_IMG(1880, 540, SH_SOFT, { align: 'center', anchorY: 'middle', rotation: 90, ls: 3, size: 13 });
+  editorial.layouts.B.texts.credit = C_BG(1800, 1030, { size: 14 });
+  editorial.layouts.C.texts.credit = C_BG(1800, 98, { size: 14 });
+  dreamy.layouts.A.texts.credit = C_IMG(1840, 1040, PS);
+  dreamy.layouts.B.texts.credit = C_BG(1840, 1040);
+  dreamy.layouts.C.texts.credit = C_BG(1840, 1040);
+
   return [minimal, cinema, letter, editorial, dreamy];
 })();

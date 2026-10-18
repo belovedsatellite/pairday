@@ -180,3 +180,19 @@ input[type=color]::-webkit-color-swatch { border: 0; border-radius: 5px; }
   .panel.left { order: 3; border-right: 0; overflow: visible; }
   .panel { overflow: visible; }
 }
+
+/* ── 말풍선 프리셋 ── */
+.preset-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.preset { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 4px 8px; border: 1px solid var(--line); border-radius: 8px; background: #fff; cursor: pointer; font-size: 11.5px; font-weight: 600; color: var(--muted); }
+.preset:hover { background: var(--soft); color: var(--text); }
+.preset.active { border-color: var(--text); color: var(--text); box-shadow: 0 0 0 1px var(--text); }
+.pv { position: relative; width: 38px; height: 20px; display: grid; place-items: center; font: 700 22px/1 Georgia, serif; color: var(--muted); }
+.pv-none::after { content: "Aa"; font: 700 13px/1 "Pretendard Variable", sans-serif; color: var(--muted); }
+.pv-bubble { background: #E9E7E2; border-radius: 10px; }
+.pv-bubble::after { content: ""; position: absolute; left: 7px; bottom: -6px; border: 4px solid transparent; border-top: 5px solid #E9E7E2; border-left-color: #E9E7E2; }
+.pv-square { background: #fff; border: 1.5px solid var(--text); border-radius: 2px; }
+.pv-square::after { content: ""; position: absolute; left: 5px; bottom: -7px; width: 7px; height: 7px; background: #fff; border-right: 1.5px solid var(--text); border-bottom: 1.5px solid var(--text); transform: skewX(-30deg) rotate(45deg); }
+.pv-thought { background: #E9E7E2; border-radius: 12px; }
+.pv-thought::after { content: ""; position: absolute; left: 4px; bottom: -8px; width: 6px; height: 6px; border-radius: 50%; background: #E9E7E2; box-shadow: -4px 5px 0 -1.5px #E9E7E2; }
+.pv-quote { border-left: 3px solid var(--text); justify-items: start; padding-left: 4px; height: 22px; line-height: 0.9; align-items: start; }
+.pv-tag { background: var(--text); border-radius: 10px; }

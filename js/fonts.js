@@ -69,16 +69,26 @@ window.Fonts = (function () {
       encodeURIComponent(f).replace(/%20/g, '+') + (ax ? ':' + ax : '') + '&display=swap';
   }
 
+  // Google Fonts 응답은 @font-face 규칙과 fonts.gstatic.com 주소만 허용
+  function isSafeFontCss(css) {
+    if (typeof css !== 'string' || css.length > 500000 || !/@font-face/.test(css)) return false;
+    if (/@import|expression\(|javascript:|<\/?style/i.test(css)) return false;
+    const urls = css.match(/url\(([^)]*)\)/g) || [];
+    return urls.every(u => /^url\(\s*['"]?https:\/\/fonts\.gstatic\.com\//.test(u));
+  }
+  const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9 \-]{0,59}$/;
+
   async function tryLoad(f) {
+    if (!NAME_RE.test(f)) return false;
     const cands = [];
     if (axesFor[f]) cands.push(axesFor[f]);
     cands.push('wght@100..900', 'wght@400;700', null);
     for (const ax of [...new Set(cands)]) {
       try {
-        const r = await fetch(cssUrl(f, ax));
+        const r = await fetch(cssUrl(f, ax), { credentials: 'omit', referrerPolicy: 'no-referrer' });
         if (!r.ok) continue;
         const css = await r.text();
-        if (!/@font-face/.test(css)) continue;
+        if (!isSafeFontCss(css)) continue;
         const st = document.createElement('style');
         st.dataset.font = f;
         st.textContent = css;
